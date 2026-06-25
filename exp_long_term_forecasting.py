@@ -15,152 +15,16 @@ from utils.dtw_metric import dtw, accelerated_dtw
 from utils.augmentation import run_augmentation, run_augmentation_single
 import torch_dct as dct
 import torch.nn.functional as F
-from layers.DWT_Decomposition import Decomposition
 warnings.filterwarnings('ignore')
-
 import torch
 import torch.nn.functional as F
 import torch_dct as dct
 import inspect
 
-
-def multi_scale_dct_loss(pred, target, scales=(1, 2, 4), weights=None, loss_type="mae"):
-    """
-    pred/target: [B, pred_len, C]
-    Compute multi-scale frequency-domain loss with DCT.
-    """
-    if weights is None:
-        weights = [1.0 / len(scales)] * len(scales)
-
-    total_loss = pred.new_tensor(0.0)
-
-    for scale, weight in zip(scales, weights):
-        if pred.size(1) < scale:
-            continue
-
-        pred_s = pred
-        target_s = target
-
-        if scale > 1:
-            pred_s = F.avg_pool1d(
-                pred.permute(0, 2, 1),
-                kernel_size=scale,
-                stride=scale
-            ).permute(0, 2, 1)
-
-            target_s = F.avg_pool1d(
-                target.permute(0, 2, 1),
-                kernel_size=scale,
-                stride=scale
-            ).permute(0, 2, 1)
-
-        pred_f = dct.dct(pred_s.permute(0, 2, 1), norm="ortho")
-        target_f = dct.dct(target_s.permute(0, 2, 1), norm="ortho")
-
-        if loss_type == "mae":
-            loss = torch.mean(torch.abs(pred_f - target_f))
-        else:
-            loss = torch.mean((pred_f - target_f) ** 2)
-
-        total_loss = total_loss + weight * loss
-
-    return total_loss
-import torch
-import torch.nn.functional as F
-import torch_dct as dct
-
-
-def multi_scale_time_freq_loss(
-    pred,
-    target,
-    scales=(1, 2, 4),
-    time_weight=1.0,
-    freq_weight=0.1,
-    scale_weights=None,
-    time_loss_type="mse",
-    freq_loss_type="mse",
-    downsample_method="avg",
-):
-    """
-    pred/target: [B, pred_len, C]
-
-    Returns:
-        total_loss, time_loss, freq_loss
-    """
-    if scale_weights is None:
-        scale_weights = [1.0 / len(scales)] * len(scales)
-
-    time_total = pred.new_tensor(0.0)
-    freq_total = pred.new_tensor(0.0)
-    criterion1 = nn.L1Loss()
-    for scale, scale_weight in zip(scales, scale_weights):
-        if pred.size(1) < scale:
-            continue
-
-        pred_s = pred
-        target_s = target
-
-        if scale > 1:
-            pred_ch = pred.permute(0, 2, 1)
-            target_ch = target.permute(0, 2, 1)
-
-            if downsample_method == "max":
-                pred_s = F.max_pool1d(pred_ch, kernel_size=scale, stride=scale)
-                target_s = F.max_pool1d(target_ch, kernel_size=scale, stride=scale)
-            else:
-                pred_s = F.avg_pool1d(pred_ch, kernel_size=scale, stride=scale)
-                target_s = F.avg_pool1d(target_ch, kernel_size=scale, stride=scale)
-
-            pred_s = pred_s.permute(0, 2, 1)
-            target_s = target_s.permute(0, 2, 1)
-
-        if time_loss_type == "mae":
-            time_loss = criterion1(pred_s ,target_s)
-        else:
-            time_loss = torch.mean((pred_s - target_s) ** 2)
-
-        pred_f = dct.dct(pred_s.permute(0, 2, 1), norm="ortho")
-        target_f = dct.dct(target_s.permute(0, 2, 1), norm="ortho")
-
-        if freq_loss_type == "mae":
-            freq_loss = criterion1(pred_f ,target_f)
-        else:
-            freq_loss = torch.mean((pred_f - target_f) ** 2)
-
-        time_total = time_total + scale_weight * time_loss
-        freq_total = freq_total + scale_weight * freq_loss
-
-    total = time_weight * time_total + freq_weight * freq_total
-    return total, time_total, freq_total
-
 class Exp_Long_Term_Forecast(Exp_Basic):
     def __init__(self, args):
         super(Exp_Long_Term_Forecast, self).__init__(args)
-        self.wavelet_name = 'db2'
-        self.h_model = int(args.seq_len * 0.2)
-        self.Decomposition_model = Decomposition(input_length=args.seq_len,
-                                                 pred_length=args.pred_len,
-                                                 wavelet_name= self.wavelet_name ,
-                                                 level=1,
-                                                 batch_size=args.batch_size,
-                                                 channel=args.enc_in,
-                                                 d_model=args.d_model,
-                                                 tfactor=2,
-                                                 dfactor=4,
-                                                 device= args.device,
-                                                 no_decomposition=False,
-                                                 use_amp=False)
-        self.patch_stride = 24
-        self.patch_len = 24
 
-        self.patch_num = int((args.seq_len - self.patch_len) / self.patch_stride + 2)
-
-    def do_patching(self, x):
-        x_end = x[:, :, -1:]
-        x_padding = x_end.repeat(1, 1, self.patch_stride)
-        x_new = torch.cat((x, x_padding), dim=-1)
-        x_patch = x_new.unfold(dimension=-1, size=self.patch_len, step=self.patch_stride)
-        return x_patch
 
     def _build_model(self):
         model = self.model_dict[self.args.model](self.args).float()
@@ -334,11 +198,8 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                     outputs_d = dct.dct(outputs, norm='ortho')
                     batch_y_d = dct.dct(batch_y, norm='ortho')
 
-                    loss = 0.9 * criterion1(outputs, batch_y) + 0.1 * criterion1(outputs_d, batch_y_d)
-                    # reg_loss = self._model_regularization_loss(outputs, batch_y)
-                    # if reg_loss is not None:
-                    #     loss = loss + reg_loss
-                    #loss = criterion(outputs, batch_y)
+                    loss = 0.5 * criterion1(outputs, batch_y) + 0.5 * criterion1(outputs_d, batch_y_d)
+
                     train_loss.append(loss.item())
 
                 if (i + 1) % 100 == 0:
